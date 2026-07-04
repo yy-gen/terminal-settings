@@ -87,6 +87,24 @@ install_packages() {
 
   local to_install=()
   for pkg in "${packages[@]}"; do
+    # nodejs/npm은 NodeSource 등 외부 저장소로 설치된 경우 dpkg 패키지명이 다르거나
+    # (NodeSource nodejs에 npm 포함) 우분투 npm 패키지와 의존성이 충돌하므로,
+    # 실제 명령어 존재 여부로 판단한다.
+    case "$pkg" in
+      nodejs)
+        if command -v node >/dev/null 2>&1; then
+          log "Already installed: $pkg ($(node --version))"
+          continue
+        fi
+        ;;
+      npm)
+        if command -v npm >/dev/null 2>&1; then
+          log "Already installed: $pkg ($(npm --version))"
+          continue
+        fi
+        ;;
+    esac
+
     if dpkg -s "$pkg" >/dev/null 2>&1; then
       log "Already installed: $pkg"
     else
@@ -118,6 +136,13 @@ nvim_version_ok() {
 }
 
 install_neovim() {
+  # apt로 설치된 구버전 neovim(0.9.x)이 /usr/bin/nvim에 남아 있으면
+  # 셸 command hash나 PATH 순서에 따라 새 버전 대신 실행될 수 있어 제거한다.
+  if dpkg -s neovim >/dev/null 2>&1; then
+    log "Removing outdated apt neovim ($(/usr/bin/nvim --version | head -n 1))"
+    sudo apt-get remove -y neovim neovim-runtime
+  fi
+
   if nvim_version_ok; then
     log "Neovim already installed: $(nvim --version | head -n 1)"
     return
