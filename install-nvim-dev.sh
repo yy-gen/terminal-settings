@@ -582,11 +582,12 @@ install_plugins_headless() {
   }
 
   # LSP 서버도 미리 설치한다.
-  # mason-lspconfig의 ensure_installed가 시작 시 비동기로 설치를 걸어두므로,
-  # 여기서는 중복 설치를 트리거하지 않고 완료될 때까지 기다리기만 한다.
+  # headless 모드에서는 mason-lspconfig가 ensure_installed를 건너뛰므로
+  # (중복 설치 경쟁 없음), MasonInstall로 직접 설치한다. headless에서는 동기로 동작한다.
+  # --quiet: npm 등 설치 로그가 stderr로 중계되며 에러처럼 보이는 것을 방지. 실패는 exit code로 감지된다.
   log "Installing LSP servers via Mason"
   nvim --headless \
-    "+lua local reg = require('mason-registry'); local pkgs = {'lua-language-server','typescript-language-server','html-lsp','css-lsp','json-lsp','yaml-language-server','bash-language-server'}; local ok = vim.wait(600000, function() for _, n in ipairs(pkgs) do local found, p = pcall(reg.get_package, n); if not found or not p:is_installed() then return false end end return true end, 2000); if ok then print('mason: all LSP servers installed') else error('mason: install timed out') end" \
+    "+MasonInstall --quiet lua-language-server typescript-language-server html-lsp css-lsp json-lsp yaml-language-server bash-language-server" \
     +qa || {
     warn "Mason install failed. You can retry inside nvim with :Mason"
   }
