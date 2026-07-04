@@ -55,13 +55,13 @@ install_homebrew_if_needed() {
 
 backup_path_if_exists() {
   local path="$1"
+  # 백업 대상들의 basename이 전부 nvim이라 겹치므로, 고유한 이름을 두 번째 인자로 받는다.
+  local name="$2"
 
   if [[ -e "$path" ]]; then
     mkdir -p "$BACKUP_DIR"
-    local base
-    base="$(basename "$path")"
-    mv "$path" "${BACKUP_DIR}/${base}"
-    log "Backup: $path -> ${BACKUP_DIR}/${base}"
+    mv "$path" "${BACKUP_DIR}/${name}"
+    log "Backup: $path -> ${BACKUP_DIR}/${name}"
   fi
 }
 
@@ -78,9 +78,8 @@ install_packages() {
     lua
     luarocks
     node
-    npm
     python
-    tree-sitter
+    tree-sitter-cli
     lazygit
   )
 
@@ -97,12 +96,12 @@ install_packages() {
 backup_old_nvim() {
   log "Backing up existing Neovim config/data if present"
 
-  backup_path_if_exists "$NVIM_CONFIG_DIR"
+  backup_path_if_exists "$NVIM_CONFIG_DIR" "config-nvim"
 
   # plugin/data/cache도 같이 백업해야 lazy lock 꼬임을 피할 수 있다.
-  backup_path_if_exists "$NVIM_DATA_DIR"
-  backup_path_if_exists "$NVIM_STATE_DIR"
-  backup_path_if_exists "$NVIM_CACHE_DIR"
+  backup_path_if_exists "$NVIM_DATA_DIR" "share-nvim"
+  backup_path_if_exists "$NVIM_STATE_DIR" "state-nvim"
+  backup_path_if_exists "$NVIM_CACHE_DIR" "cache-nvim"
 }
 
 write_nvim_config() {
@@ -215,7 +214,7 @@ LUA
 
 local lazypath = vim.fn.stdpath("data") .. "/lazy/lazy.nvim"
 
-if not vim.loop.fs_stat(lazypath) then
+if not vim.uv.fs_stat(lazypath) then
   vim.fn.system({
     "git",
     "clone",
@@ -376,31 +375,49 @@ return {
   -- Syntax parser
   {
     "nvim-treesitter/nvim-treesitter",
+    branch = "main",
+    lazy = false,
     build = ":TSUpdate",
     config = function()
-      require("nvim-treesitter.configs").setup({
-        ensure_installed = {
-          "lua",
-          "vim",
-          "vimdoc",
-          "bash",
-          "json",
-          "yaml",
-          "xml",
-          "html",
-          "css",
-          "javascript",
-          "typescript",
-          "java",
-          "sql",
-          "markdown",
-        },
-        highlight = {
-          enable = true,
-        },
-        indent = {
-          enable = true,
-        },
+      local parsers = {
+        "lua",
+        "vim",
+        "vimdoc",
+        "bash",
+        "json",
+        "yaml",
+        "xml",
+        "html",
+        "css",
+        "javascript",
+        "typescript",
+        "java",
+        "sql",
+        "markdown",
+        "markdown_inline",
+      }
+
+      -- 미설치 파서만 비동기로 설치한다 (이미 있으면 no-op).
+      -- headless(설치 스크립트)에서는 스크립트의 명시적 설치 단계와
+      -- 경쟁하지 않도록, 실제 UI가 붙은 뒤에만 실행한다.
+      vim.api.nvim_create_autocmd("UIEnter", {
+        once = true,
+        callback = function()
+          require("nvim-treesitter").install(parsers)
+        end,
+      })
+
+      vim.api.nvim_create_autocmd("FileType", {
+        callback = function(args)
+          local lang = vim.treesitter.language.get_lang(vim.bo[args.buf].filetype)
+          if not lang or not vim.tbl_contains(parsers, lang) then
+            return
+          end
+          -- 파서 설치가 아직 안 끝났으면 조용히 넘어간다
+          if pcall(vim.treesitter.start, args.buf, lang) then
+            vim.bo[args.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+          end
+        end,
       })
     end,
   },
@@ -481,8 +498,6 @@ return {
       "williamboman/mason-lspconfig.nvim",
     },
     config = function()
-      local lspconfig = require("lspconfig")
-
       require("mason-lspconfig").setup({
         ensure_installed = {
           "lua_ls",
@@ -497,7 +512,7 @@ return {
       })
 
       -- Lua LSP: Neovim runtime 인식
-      lspconfig.lua_ls.setup({
+      vim.lsp.config("lua_ls", {
         settings = {
           Lua = {
             diagnostics = {
@@ -537,8 +552,12 @@ return {
           map("n", "<leader>cf", function()
             vim.lsp.buf.format({ async = true })
           end, "Format code")
-          map("n", "[d", vim.diagnostic.goto_prev, "Previous diagnostic")
-          map("n", "]d", vim.diagnostic.goto_next, "Next diagnostic")
+          map("n", "[d", function()
+            vim.diagnostic.jump({ count = -1, float = true })
+          end, "Previous diagnostic")
+          map("n", "]d", function()
+            vim.diagnostic.jump({ count = 1, float = true })
+          end, "Next diagnostic")
           map("n", "<leader>dd", vim.diagnostic.open_float, "Line diagnostics")
         end,
       })
@@ -552,6 +571,24 @@ install_plugins_headless() {
   log "Installing Neovim plugins headless"
   nvim --headless "+Lazy! sync" +qa || {
     warn "Plugin sync failed. You can retry inside nvim with :Lazy sync"
+  }
+
+  # treesitter 파서를 동기로 설치해서 첫 실행 시 하이라이팅이 바로 동작하게 한다.
+  log "Installing treesitter parsers"
+  nvim --headless \
+    "+lua require('nvim-treesitter').install({'lua','vim','vimdoc','bash','json','yaml','xml','html','css','javascript','typescript','java','sql','markdown','markdown_inline'}):wait(300000)" \
+    +qa || {
+    warn "Treesitter parser install failed. You can retry inside nvim with :TSUpdate"
+  }
+
+  # LSP 서버도 미리 설치한다.
+  # mason-lspconfig의 ensure_installed가 시작 시 비동기로 설치를 걸어두므로,
+  # 여기서는 중복 설치를 트리거하지 않고 완료될 때까지 기다리기만 한다.
+  log "Installing LSP servers via Mason"
+  nvim --headless \
+    "+lua local reg = require('mason-registry'); local pkgs = {'lua-language-server','typescript-language-server','html-lsp','css-lsp','json-lsp','yaml-language-server','bash-language-server'}; local ok = vim.wait(600000, function() for _, n in ipairs(pkgs) do local found, p = pcall(reg.get_package, n); if not found or not p:is_installed() then return false end end return true end, 2000); if ok then print('mason: all LSP servers installed') else error('mason: install timed out') end" \
+    +qa || {
+    warn "Mason install failed. You can retry inside nvim with :Mason"
   }
 }
 

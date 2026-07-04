@@ -274,7 +274,7 @@ style = "blue bold"
 [kubernetes]
 disabled = false
 symbol = "☸ "
-format = "[$symbol$context( \($namespace\))]($style) "
+format = '[$symbol$context( \($namespace\))]($style) '
 style = "cyan bold"
 
 [cmd_duration]
